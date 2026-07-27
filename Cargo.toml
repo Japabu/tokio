@@ -17,7 +17,7 @@ members = [
 
 [patch.crates-io]
 tokio = { path = "tokio" }
-mio = { path = "../mio" }
+mio = { git = "https://github.com/Japabu/mio", branch = "toyos" }
 tokio-macros = { path = "tokio-macros" }
 tokio-stream = { path = "tokio-stream" }
 tokio-test = { path = "tokio-test" }
