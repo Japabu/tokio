@@ -835,33 +835,42 @@ impl TcpSocket {
     /// }
     /// ```
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
-        if let Err(err) = self.inner.connect(&addr.into()) {
-            #[cfg(not(windows))]
-            if err.raw_os_error() != Some(libc::EINPROGRESS) {
-                return Err(err);
-            }
-            #[cfg(windows)]
-            if err.kind() != io::ErrorKind::WouldBlock {
-                return Err(err);
-            }
+        #[cfg(target_os = "toyos")]
+        {
+            // On ToyOS, socket2 connect is synchronous. Just use TcpStream::connect.
+            drop(self);
+            return TcpStream::connect(addr).await;
         }
-        #[cfg(not(windows))]
-        let mio = {
-            use std::os::fd::{FromRawFd, IntoRawFd};
+        #[cfg(not(target_os = "toyos"))]
+        {
+            if let Err(err) = self.inner.connect(&addr.into()) {
+                #[cfg(not(windows))]
+                if err.raw_os_error() != Some(libc::EINPROGRESS) {
+                    return Err(err);
+                }
+                #[cfg(windows)]
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    return Err(err);
+                }
+            }
+            #[cfg(not(windows))]
+            let mio = {
+                use std::os::fd::{FromRawFd, IntoRawFd};
 
-            let raw_fd = self.inner.into_raw_fd();
-            unsafe { mio::net::TcpStream::from_raw_fd(raw_fd) }
-        };
+                let raw_fd = self.inner.into_raw_fd();
+                unsafe { mio::net::TcpStream::from_raw_fd(raw_fd) }
+            };
 
-        #[cfg(windows)]
-        let mio = {
-            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+            #[cfg(windows)]
+            let mio = {
+                use std::os::windows::io::{FromRawSocket, IntoRawSocket};
 
-            let raw_socket = self.inner.into_raw_socket();
-            unsafe { mio::net::TcpStream::from_raw_socket(raw_socket) }
-        };
+                let raw_socket = self.inner.into_raw_socket();
+                unsafe { mio::net::TcpStream::from_raw_socket(raw_socket) }
+            };
 
-        TcpStream::connect_mio(mio).await
+            TcpStream::connect_mio(mio).await
+        }
     }
 
     /// Converts the socket into a `TcpListener`.
@@ -901,23 +910,37 @@ impl TcpSocket {
     /// ```
     pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
         self.inner.listen(backlog as i32)?;
-        #[cfg(not(windows))]
-        let mio = {
-            use std::os::fd::{FromRawFd, IntoRawFd};
+        #[cfg(target_os = "toyos")]
+        {
+            // On ToyOS, drop socket2 state and re-bind via mio (which uses netd).
+            let addr = self.inner.local_addr()?;
+            let addr = addr.as_socket().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid address")
+            })?;
+            drop(self);
+            let mio = mio::net::TcpListener::bind(addr)?;
+            return TcpListener::new(mio);
+        }
+        #[cfg(not(target_os = "toyos"))]
+        {
+            #[cfg(not(windows))]
+            let mio = {
+                use std::os::fd::{FromRawFd, IntoRawFd};
 
-            let raw_fd = self.inner.into_raw_fd();
-            unsafe { mio::net::TcpListener::from_raw_fd(raw_fd) }
-        };
+                let raw_fd = self.inner.into_raw_fd();
+                unsafe { mio::net::TcpListener::from_raw_fd(raw_fd) }
+            };
 
-        #[cfg(windows)]
-        let mio = {
-            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+            #[cfg(windows)]
+            let mio = {
+                use std::os::windows::io::{FromRawSocket, IntoRawSocket};
 
-            let raw_socket = self.inner.into_raw_socket();
-            unsafe { mio::net::TcpListener::from_raw_socket(raw_socket) }
-        };
+                let raw_socket = self.inner.into_raw_socket();
+                unsafe { mio::net::TcpListener::from_raw_socket(raw_socket) }
+            };
 
-        TcpListener::new(mio)
+            TcpListener::new(mio)
+        }
     }
 
     /// Converts a [`std::net::TcpStream`] into a `TcpSocket`. The provided
@@ -955,12 +978,18 @@ impl TcpSocket {
     /// }
     /// ```
     pub fn from_std_stream(std_stream: std::net::TcpStream) -> TcpSocket {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "toyos")))]
         {
             use std::os::fd::{FromRawFd, IntoRawFd};
 
             let raw_fd = std_stream.into_raw_fd();
             unsafe { TcpSocket::from_raw_fd(raw_fd) }
+        }
+
+        #[cfg(target_os = "toyos")]
+        {
+            let _ = std_stream;
+            panic!("TcpSocket::from_std_stream is not supported on ToyOS");
         }
 
         #[cfg(windows)]
@@ -1024,6 +1053,35 @@ cfg_unix_or_wasi! {
         fn into_raw_fd(self) -> RawFd {
             self.inner.into_raw_fd()
         }
+    }
+}
+
+#[cfg(target_os = "toyos")]
+impl AsRawFd for TcpSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+#[cfg(target_os = "toyos")]
+impl AsFd for TcpSocket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+    }
+}
+
+#[cfg(target_os = "toyos")]
+impl FromRawFd for TcpSocket {
+    unsafe fn from_raw_fd(fd: RawFd) -> TcpSocket {
+        let inner = unsafe { socket2::Socket::from_raw_fd(fd) };
+        TcpSocket { inner }
+    }
+}
+
+#[cfg(target_os = "toyos")]
+impl IntoRawFd for TcpSocket {
+    fn into_raw_fd(self) -> RawFd {
+        self.inner.into_raw_fd()
     }
 }
 

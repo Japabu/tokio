@@ -36,7 +36,9 @@ cfg_not_wasip1! {
 pub use addr::ToSocketAddrs;
 
 cfg_net! {
+    #[cfg(not(target_os = "toyos"))]
     mod lookup_host;
+    #[cfg(not(target_os = "toyos"))]
     pub use lookup_host::lookup_host;
 
     pub mod tcp;
@@ -45,7 +47,9 @@ cfg_net! {
     cfg_not_wasip1! {
         pub use tcp::socket::TcpSocket;
 
+        #[cfg(not(target_os = "toyos"))]
         mod udp;
+        #[cfg(not(target_os = "toyos"))]
         #[doc(inline)]
         pub use udp::UdpSocket;
     }
